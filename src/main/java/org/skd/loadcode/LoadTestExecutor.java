@@ -1,8 +1,8 @@
 package org.skd.loadcode;
 
 import java.lang.reflect.Method;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -15,6 +15,8 @@ public class LoadTestExecutor {
     private Object testInstance;
     private final AtomicInteger totalIterations = new AtomicInteger(0);
     private volatile boolean stopTest = false;
+
+    private ThreadPoolExecutor executor;
 
     public LoadTestExecutor setThreads(int threads) {
         this.threads = threads;
@@ -44,77 +46,99 @@ public class LoadTestExecutor {
 
     public void start() {
         System.out.println("Starting Load Test...");
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        this.executor = new ThreadPoolExecutor(threads, threads, 10, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+        executor.allowCoreThreadTimeOut(true);
+        executor.setKeepAliveTime(10, TimeUnit.SECONDS);
 
         long startTime = System.currentTimeMillis();
         long endTime = (testDuration > 0) ? startTime + (testDuration * 1000L) : Long.MAX_VALUE;
 
         for (int i = 0; i < threads; i++) {
-            final int threadIndex = i; // Capture thread index to calculate ramp-up delay
-            executor.submit(() -> {
-                try {
-                    // Calculate ramp-up delay for the thread based on its index
-                    int rampUpDelay = (rampUpTime > 0) ? (rampUpTime * 1000) / threads : 0;
-                    Thread.sleep(rampUpDelay * threadIndex); // Ramp-up delay applied sequentially
-
-                    int currentIteration = 0;
-
-                    // Each thread performs its own iterations
-                    while (!stopTest && (iterations == -1 || currentIteration < iterations)) {
-                        if (System.currentTimeMillis() > endTime) break;
-
-                        totalIterations.incrementAndGet();  // Increment total iterations across all threads
-                        testMethod.invoke(testInstance, this); // Execute the test method
-
-                        currentIteration++;  // Increment this thread's iteration count
-                    }
-
-                    // Stop the test after completing the iterations
-                    if (iterations != -1 && currentIteration >= iterations) {
-                        stopTest = true;
-                        shutdownService(executor);
-                    }
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-            });
+            addThread(i, endTime);
         }
 
-        if (testDuration > 0) {
-            try {
-                executor.shutdown();
-                executor.awaitTermination(testDuration + 5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                System.err.println("Load test interrupted.");
-            }
-        } else {
-            // If no duration, wait indefinitely until stopped by the user or iterations completed
-            try {
-                executor.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                executor.shutdownNow(); // Handle interrupt and shut down immediately
-                Thread.currentThread().interrupt(); // Preserve interrupt status
-                System.err.println("Load test interrupted.");
-            }
-        }
-
-        System.out.println("Load Test Completed.");
+        // **New logic: Automatically shut down when all iterations finish**
+        monitorAndShutdown();
     }
 
-    // Methods for accessing the current state
+    private void addThread(int threadIndex, long endTime) {
+        executor.submit(() -> {
+            try {
+                int rampUpDelay = (rampUpTime > 0) ? (rampUpTime * 1000) / threads : 0;
+                Thread.sleep(rampUpDelay * threadIndex);
+
+                int currentIteration = 0;
+
+                while (!stopTest && (iterations == -1 || currentIteration < iterations)) {
+                    if (System.currentTimeMillis() > endTime) break;
+
+                    totalIterations.incrementAndGet();
+                    testMethod.invoke(testInstance, this);
+                    currentIteration++;
+                }
+
+                System.out.println("Thread " + Thread.currentThread().getName() + " finished.");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        });
+    }
+
+    public void addNewThreads(int numberOfThreads) {
+        System.out.println("Adding " + numberOfThreads + " new threads...");
+
+        int newThreadCount = threads + numberOfThreads;
+        executor.setCorePoolSize(newThreadCount);
+        executor.setMaximumPoolSize(newThreadCount);
+        threads = newThreadCount;
+
+        long endTime = (testDuration > 0) ? System.currentTimeMillis() + (testDuration * 1000L) : Long.MAX_VALUE;
+        for (int i = 0; i < numberOfThreads; i++) {
+            addThread(i, endTime);
+        }
+    }
+
     public int getTotalThreads() {
-        return threads;
+        return executor.getActiveCount();
     }
 
     public int getTotalIterations() {
         return totalIterations.get();
     }
 
-    public void shutdownService(ExecutorService executor){
+    public void shutdownService() {
+        System.out.println("Shutting down LoadTestExecutor...");
+        stopTest = true;
         executor.shutdown();
+        try {
+            if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            executor.shutdownNow();
+        }
     }
 
     public void stop() {
         this.stopTest = true;
+    }
+
+    // **New method: Auto-detect completion and shut down**
+    private void monitorAndShutdown() {
+        new Thread(() -> {
+            try {
+                while (!executor.isTerminated()) {
+                    if (iterations != -1 && executor.getActiveCount() == 0) {
+                        System.out.println("All iterations completed. Shutting down...");
+                        shutdownService();
+                        break;
+                    }
+                    Thread.sleep(1000); // Check every second
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.err.println("Load test monitor interrupted.");
+            }
+        }).start();
     }
 }

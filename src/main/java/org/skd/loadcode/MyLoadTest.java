@@ -1,12 +1,6 @@
 package org.skd.loadcode;
 
-import org.json.JSONObject;
-import org.tinylog.Logger;
-import skd.mobiLoad.builders.AddProcess;
-import skd.mobiLoad.conf.Constants;
-import skd.requests.Headers;
-import skd.requests.Requests;
-import skd.requests.ResponseData;
+
 
 import java.io.IOException;
 import java.util.List;
@@ -28,6 +22,12 @@ public class MyLoadTest {
     public void testScenario(LoadTestExecutor tgroup) {
         System.out.println("Executing test: " + Thread.currentThread().getName());
 
+
+        try {
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
 
